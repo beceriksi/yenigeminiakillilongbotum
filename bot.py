@@ -8,7 +8,7 @@ TOKEN = os.getenv('TELEGRAM_TOKEN')
 CHAT_ID = os.getenv('TELEGRAM_CHAT_ID')
 
 # SERT FİLTRE AYARLARI (Sadece absürt hareketlerde çalışır)
-VOL_SPIKE_THRESHOLD = 3.0  # Hacim ortalamanın 3 katı olmalı (Anormallik belirtisi)
+VOL_SPIKE_THRESHOLD = 2.0  # Hacim ortalamanın 3 katı olmalı (Anormallik belirtisi)
 MIN_BUY_RATIO = 2.0        # Alıcılar satıcıların en az 2 katı olmalı
 MAX_24H_CHANGE = 10        # %10'dan fazla yükselmişse zaten hareket bitmiştir, bakma
 
