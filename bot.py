@@ -7,10 +7,10 @@ import os
 TOKEN = os.getenv('TELEGRAM_TOKEN')
 CHAT_ID = os.getenv('TELEGRAM_CHAT_ID')
 
-# SERT FİLTRE AYARLARI (Sadece absürt hareketlerde çalışır)
-VOL_SPIKE_THRESHOLD = 2.0  # Hacim ortalamanın 3 katı olmalı (Anormallik belirtisi)
-MIN_BUY_RATIO = 2.0        # Alıcılar satıcıların en az 2 katı olmalı
-MAX_24H_CHANGE = 10        # %10'dan fazla yükselmişse zaten hareket bitmiştir, bakma
+# STRATEJİ AYARLARI
+VOL_SPIKE_THRESHOLD = 1.6  # 15dk'lık hacim son 10 mumun 1.6 katı olmalı
+MAX_24H_CHANGE = 20        # %20'den fazla yükselmişse trene binme
+PIVOT_LOOKBACK = 3         # Daha güçlü dirençler için pivot hassasiyeti
 
 def send_telegram(msg):
     if TOKEN and CHAT_ID:
@@ -26,7 +26,7 @@ def get_data(endpoint, params={}):
         return res.get('data', [])
     except: return []
 
-def find_pivots(df, pivot_len=2):
+def find_pivots(df, pivot_len=3):
     highs = df['h'].astype(float).values
     p_highs = []
     for i in range(pivot_len, len(highs) - pivot_len):
@@ -37,6 +37,7 @@ def find_pivots(df, pivot_len=2):
 
 def scan_unusual_movements():
     tickers = get_data("/api/v5/market/tickers", {"instType": "SWAP"})
+    
     for t in tickers:
         symbol = t['instId']
         if "-USDT-" not in symbol: continue
@@ -44,49 +45,59 @@ def scan_unusual_movements():
         last_p = float(t['last'])
         change_24h = (last_p / float(t['open24h']) - 1) * 100
         
-        # Filtre 1: Hareket henüz çok eskimemiş olmalı
-        if -2 < change_24h < MAX_24H_CHANGE:
-            candles = get_data("/api/v5/market/candles", {"instId": symbol, "bar": "1H", "limit": "50"})
-            if not candles: continue
+        # Filtre 1: Aşırı şişmiş coinleri ele, hareketin başındakileri tut
+        if -3 < change_24h < MAX_24H_CHANGE:
             
-            df = pd.DataFrame(candles, columns=['ts','o','h','l','c','v','vc','vq','conf']).iloc[::-1].reset_index(drop=True)
-            df[['h','c','vq']] = df[['h','c','vq']].astype(float)
+            # 1. BÜYÜK RESİM: 1 Saatlik Direnç Analizi
+            candles_1h = get_data("/api/v5/market/candles", {"instId": symbol, "bar": "1H", "limit": "60"})
+            if not candles_1h: continue
             
-            # Filtre 2: Absürt Hacim Girişi (Volume Anomaly)
-            avg_vol = df['vq'].iloc[-21:-1].mean() # Son mum hariç önceki 20 mum ortalaması
-            curr_vol = df['vq'].iloc[-1]
+            df_1h = pd.DataFrame(candles_1h, columns=['ts','o','h','l','c','v','vc','vq','conf']).iloc[::-1].reset_index(drop=True)
+            df_1h[['h','c']] = df_1h[['h','c']].astype(float)
             
-            if curr_vol > (avg_vol * VOL_SPIKE_THRESHOLD):
-                p_highs = find_pivots(df)
-                if not p_highs: continue
-                last_res = p_highs[-1]
+            p_highs = find_pivots(df_1h, pivot_len=PIVOT_LOOKBACK)
+            if not p_highs: continue
+            last_res = p_highs[-1]
+            
+            # ŞART A: Fiyat SAATLİKTE direncin üzerinde mi? (Son 2 kapanış direnç üstü olmalı)
+            is_above_res = df_1h['c'].iloc[-1] > last_res and df_1h['c'].iloc[-2] > last_res
+            
+            if is_above_res:
+                # 2. HIZLI TAKİP: 15 Dakikalık Hacim Analizi
+                candles_15m = get_data("/api/v5/market/candles", {"instId": symbol, "bar": "15m", "limit": "20"})
+                if not candles_15m: continue
                 
-                # Filtre 3: Sert Direnç Kırılımı (1H)
-                if df['c'].iloc[-2] <= last_res and df['c'].iloc[-1] > last_res:
+                df_15m = pd.DataFrame(candles_15m, columns=['ts','o','h','l','c','v','vc','vq','conf']).iloc[::-1].reset_index(drop=True)
+                df_15m[['c','vq']] = df_15m[['c','vq']].astype(float)
+                
+                # ŞART B: 15 Dakikalıkta hacim patlaması var mı?
+                avg_vol_15m = df_15m['vq'].iloc[-11:-1].mean()
+                curr_vol_15m = df_15m['vq'].iloc[-1]
+                
+                if curr_vol_15m > (avg_vol_15m * VOL_SPIKE_THRESHOLD):
                     
-                    # Filtre 4: Alıcı Baskısı (Taker Volume Ratio)
+                    # 3. ONAY: Alım Baskısı (Taker Ratio)
                     ratio_res = get_data("/api/v5/rubik/stat/taker-volume", {"instId": symbol, "period": "1H"})
+                    buy_ratio = 1.0
                     if ratio_res:
                         buy_v = float(ratio_res[0][1])
                         sell_v = float(ratio_res[0][2])
-                        ratio = buy_v / sell_v if sell_v > 0 else 1.0
+                        buy_ratio = buy_v / sell_v if sell_v > 0 else 1.0
+
+                    if buy_ratio >= 1.3: # Alım baskısı makul seviyede
+                        tv_link = f"https://www.tradingview.com/chart/?symbol=OKX:{symbol.replace('-USDT-SWAP', 'USDTPERP')}"
                         
-                        if ratio >= MIN_BUY_RATIO:
-                            tv_link = f"https://www.tradingview.com/chart/?symbol=OKX:{symbol.replace('-USDT-SWAP', 'USDTPERP')}"
-                            
-                            msg = (f"🚨 *ANORMAL HACİM & KIRILIM UYARISI*\n\n"
-                                   f"💎 *COIN:* `{symbol}`\n"
-                                   f"📊 24s Değişim: `%{round(change_24h, 1)}` \n"
-                                   f"⚠️ *DURUM:* Sıra dışı para girişi tespit edildi!\n"
-                                   f"━━━━━━━━━━━━━━━\n"
-                                   f"📈 *HACİM PATLAMASI:* Ortalamanın `{round(curr_vol/avg_vol, 1)}x` katı!\n"
-                                   f"✅ *DİRENÇ GEÇİLDİ (1H):* `{last_res}`\n"
-                                   f"⚖️ *ALIM BASKISI (Oran):* `{round(ratio, 2)}` \n\n"
-                                   f"🛒 *DETAY:* Alış: `${round(buy_v/1000, 1)}K` / Satış: `${round(sell_v/1000, 1)}K` \n"
-                                   f"━━━━━━━━━━━━━━━\n"
-                                   f"🔗 [Grafiği İncele]({tv_link})")
-                            
-                            send_telegram(msg)
+                        msg = (f"🚀 *PUMP ÖNCESİ KALICILIK & HACİM TESPİTİ*\n\n"
+                               f"💎 *COIN:* `{symbol}`\n"
+                               f"📈 24s Değişim: `%{round(change_24h, 1)}` \n"
+                               f"━━━━━━━━━━━━━━━\n"
+                               f"📍 *1H DİRENÇ ÜSTÜ:* `{last_res}` (Kalıcı)\n"
+                               f"🔥 *15DK HACİM:* `{round(curr_vol_15m/avg_vol_15m, 1)}x` Artış!\n"
+                               f"⚖️ *ALIM BASKISI:* `{round(buy_ratio, 2)}` \n"
+                               f"━━━━━━━━━━━━━━━\n"
+                               f"🔗 [Grafiği Aç]({tv_link})")
+                        
+                        send_telegram(msg)
 
 if __name__ == "__main__":
     scan_unusual_movements()
