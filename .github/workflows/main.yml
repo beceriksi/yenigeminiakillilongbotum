@@ -1,29 +1,31 @@
-name: Unusual Movement Scanner
+name: Crypto Pump Scanner
 
 on:
   schedule:
-    - cron: '0 * * * *' # Her saat başı çalışır (Örn: 13:00, 14:00)
-  workflow_dispatch: # İstediğin an manuel çalıştırmak için düğme ekler
+    # Her 10 dakikada bir çalışacak şekilde ayarlandı
+    - cron: '*/10 * * * *'
+  workflow_dispatch: # İstediğinde manuel olarak başlatabilmen için
 
 jobs:
   build:
     runs-on: ubuntu-latest
+
     steps:
       - name: Checkout code
         uses: actions/checkout@v3
 
       - name: Set up Python
-        uses: actions/setup-python@v4
+        uses: actions/status-python@v4
         with:
           python-version: '3.9'
 
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install -r requirements.txt
+          pip install requests pandas numpy
 
-      - name: Run bot
+      - name: Run Scanner
         env:
           TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-        run: python bot.py
+        run: python bot_dosya_adin.py # Buraya python dosyanın adını tam yaz
